@@ -82,12 +82,47 @@ part of the artifact and gated by `test/workflow.test.mjs`:
   before the shell parses the script, so a `repository_dispatch` payload (attacker-
   influenced data) would become shell code. Payload values are passed through `env:`
   and read as quoted shell variables instead.
-- pull-request validation and production do not share a concurrency group: PRs run in
-  `docs-pr-<number>` with `cancel-in-progress`, everything else in `docs-pages-deploy`
-  without it. A push to a PR therefore cancels only other validation runs — never an
-  in-flight deployment — and production runs queue rather than interrupt each other.
+- a `repository_dispatch` may only come from a configured documentation source.
+  `scripts/validate-dispatch-source.mjs` rejects any other repository before the build
+  starts, so only `DOC_SETS`' repositories can trigger a deployment.
+- concurrency lives on the jobs, not on the workflow: the `build` job collapses
+  concurrent builds (`cancel-in-progress: true` — a superseded build is a pure function
+  of the source branches and has nothing to publish), while the `deploy` job runs in its
+  own `docs-pages-deploy` group with `cancel-in-progress: false`, so a Pages publish is
+  never interrupted. Pull-request validation keeps its own per-PR group and can cancel
+  neither a production build nor a deployment.
 - the checkout repositories, vendor paths, npm cache keys and artifact-summary paths match
   `DOC_SETS`, so the workflow and the assembler cannot drift apart silently.
+
+## Rebuilding when a source repository changes
+
+`docs` is the only repository that assembles and deploys the combined site, and the only
+one holding Pages credentials. Each documentation source repository
+(`k3-vault-docs`, `sBOLT-docs`) carries a small `notify-docs-portal.yml` workflow that
+runs after a push to its `main`:
+
+1. mints a short-lived GitHub App installation token scoped to `K3-Capital/docs`
+   (`actions/create-github-app-token`, with `repositories: docs`) — no long-lived PAT,
+   and no permission for the source repository itself;
+2. POSTs a `repository_dispatch` to this repository with
+   `event_type: docs-source-updated` and `client_payload: { repository, sha, ref }`.
+
+The sender's token is scoped to this repository alone, so the source repositories gain no
+deployment credentials of any kind. The workflow file and its contract test live in the
+source repositories; the contract itself is asserted on this side too
+(`test/dispatch.test.mjs` checks the event type and the known source repositories against
+the workflow).
+
+Two things the senders require in each source repository (or as organisation secrets
+visible to them), from a GitHub App installed on `K3-Capital/docs` with
+`Contents: Read and write`:
+
+- `DOCS_DISPATCH_APP_ID`
+- `DOCS_DISPATCH_APP_PRIVATE_KEY`
+
+Manual rebuilds stay available: `workflow_dispatch` on this workflow rebuilds the whole
+site, and `workflow_dispatch` on a source repository's notify workflow re-sends its
+dispatch.
 
 ## Local verification
 

@@ -3,14 +3,33 @@ import test from "node:test";
 
 import { DEFAULTS, SBOLT_DOC_SET, VAULT_DOC_SET } from "../scripts/lib/site.mjs";
 import {
-  extractConcurrency,
+  extractJobConcurrency,
   extractRunSteps,
   readWorkflow,
+  resolveConcurrencyFlag,
   resolveConcurrencyGroup,
+  resolveGroup,
 } from "../scripts/lib/workflow.mjs";
 
 const workflow = await readWorkflow();
 const runSteps = extractRunSteps(workflow);
+const jobConcurrency = extractJobConcurrency(workflow);
+
+const EVENTS = {
+  pullRequest: { event_name: "pull_request", event: { pull_request: { number: 42 } } },
+  otherPullRequest: { event_name: "pull_request", event: { pull_request: { number: 43 } } },
+  push: { event_name: "push", ref: "refs/heads/main" },
+  manual: { event_name: "workflow_dispatch" },
+  dispatch: { event_name: "repository_dispatch" },
+};
+
+function groupFor(job, event) {
+  return resolveGroup(jobConcurrency[job].group, event);
+}
+
+function cancellable(job, event) {
+  return resolveConcurrencyFlag(jobConcurrency[job].cancelInProgress, event);
+}
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -37,8 +56,9 @@ function stepNamed(name) {
 }
 
 test("the workflow reader sees the real run steps", () => {
-  assert.equal(runSteps.length, 4, "the build job's four run steps");
+  assert.equal(runSteps.length, 5, "the build job's five run steps");
   for (const name of [
+    "Validate the dispatch source",
     "Record documentation source revisions",
     "Run portal unit tests",
     "Build documentation sources and assemble the site",
@@ -112,43 +132,109 @@ test("dispatch payload values reach the script through env:, not through the she
   assert.match(step.run, /echo "dispatch payload sha:        \$DISPATCH_SHA"/);
 });
 
-test("pull-request validation and production use different concurrency groups", () => {
-  const { group } = extractConcurrency(workflow);
+test("the build job collapses concurrent builds and gives PR validation its own group", () => {
+  assert.equal(groupFor("build", EVENTS.pullRequest), "docs-pr-42");
+  assert.equal(groupFor("build", EVENTS.otherPullRequest), "docs-pr-43");
+  assert.equal(groupFor("build", EVENTS.push), "docs-pages-build");
+  assert.equal(groupFor("build", EVENTS.manual), "docs-pages-build");
+  assert.equal(groupFor("build", EVENTS.dispatch), "docs-pages-build");
 
-  const pullRequest = resolveConcurrencyGroup(group, {
-    event_name: "pull_request",
-    event: { pull_request: { number: 42 } },
-  });
-  const push = resolveConcurrencyGroup(group, { event_name: "push", ref: "refs/heads/main" });
-  const dispatch = resolveConcurrencyGroup(group, { event_name: "repository_dispatch" });
-  const manual = resolveConcurrencyGroup(group, { event_name: "workflow_dispatch" });
+  assert.notEqual(
+    groupFor("build", EVENTS.pullRequest),
+    groupFor("build", EVENTS.dispatch),
+    "a PR run must not share the production build group",
+  );
 
-  assert.equal(pullRequest, "docs-pr-42");
-  assert.equal(push, "docs-pages-deploy");
-  assert.equal(dispatch, "docs-pages-deploy");
-  assert.equal(manual, "docs-pages-deploy");
-
-  assert.notEqual(pullRequest, push, "a PR run must not share the production group");
-
-  const otherPr = resolveConcurrencyGroup(group, {
-    event_name: "pull_request",
-    event: { pull_request: { number: 43 } },
-  });
-  assert.notEqual(otherPr, pullRequest, "each PR validates in its own group");
+  for (const job of ["build", "deploy"]) {
+    for (const [name, event] of Object.entries(EVENTS)) {
+      assert.notEqual(
+        groupFor(job, event),
+        "",
+        `job ${job} must have a concurrency group for the ${name} event`,
+      );
+    }
+  }
 });
 
-test("only pull-request runs are cancellable, so a PR cannot cancel a deployment", () => {
-  const { cancelInProgress } = extractConcurrency(workflow);
+test("every build is cancellable, so only the newest concurrent build survives", () => {
+  for (const [name, event] of Object.entries(EVENTS)) {
+    assert.equal(
+      cancellable("build", event),
+      true,
+      `the build job must be cancellable for the ${name} event: a superseded build has nothing to publish`,
+    );
+  }
+});
 
-  const asBoolean = (event) => resolveConcurrencyGroup(cancelInProgress, event) === "true";
+test("no deployment can be cancelled, and builds never share the deploy group", () => {
+  for (const [name, event] of Object.entries(EVENTS)) {
+    assert.equal(
+      cancellable("deploy", event),
+      false,
+      `the deploy job must not be cancellable for the ${name} event`,
+    );
+    assert.notEqual(
+      groupFor("deploy", event),
+      groupFor("build", event),
+      `job deploy must not share a concurrency group with job build for the ${name} event`,
+    );
+  }
 
-  assert.equal(
-    asBoolean({ event_name: "pull_request", event: { pull_request: { number: 42 } } }),
-    true,
-  );
-  assert.equal(asBoolean({ event_name: "push" }), false);
-  assert.equal(asBoolean({ event_name: "repository_dispatch" }), false);
-  assert.equal(asBoolean({ event_name: "workflow_dispatch" }), false);
+  assert.equal(groupFor("deploy", EVENTS.dispatch), "docs-pages-deploy");
+  assert.equal(groupFor("deploy", EVENTS.push), "docs-pages-deploy");
+  assert.equal(groupFor("deploy", EVENTS.manual), "docs-pages-deploy");
+});
+
+test("concurrency lives on the jobs, not on the workflow", () => {
+  // A workflow-level group would cancel whole runs — including a run that is already
+  // deploying — so the guarantees above are expressed per job instead.
+  assert.doesNotMatch(workflow, /^concurrency:/m, "no top-level concurrency: block");
+  assert.deepEqual(Object.keys(jobConcurrency).sort(), ["build", "deploy"]);
+});
+
+/**
+ * The pre-fix workflow, kept as a fixture: one workflow-level group that serialised
+ * production runs without collapsing concurrent builds and without protecting the
+ * deploy from cancellation semantics of its own.
+ */
+const PRE_FIX_WORKFLOW = `name: Build and deploy docs.k3.capital
+on:
+  push:
+    branches:
+      - main
+concurrency:
+  group: docs-pages-deploy
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run portal unit tests
+        run: npm test
+`;
+
+function buildIsCollapsible(text) {
+  const job = extractJobConcurrency(text).build;
+  if (job?.cancelInProgress === undefined) {
+    return false;
+  }
+  return resolveConcurrencyFlag(job.cancelInProgress, EVENTS.dispatch);
+}
+
+function deployIsProtected(text) {
+  const job = extractJobConcurrency(text).deploy;
+  if (job?.cancelInProgress === undefined) {
+    return false;
+  }
+  return !resolveConcurrencyFlag(job.cancelInProgress, EVENTS.dispatch);
+}
+
+test("the concurrency gates flag the pre-fix workflow", () => {
+  assert.equal(buildIsCollapsible(PRE_FIX_WORKFLOW), false, "pre-fix builds cannot collapse");
+  assert.equal(deployIsProtected(PRE_FIX_WORKFLOW), false, "pre-fix deployments are unprotected");
+
+  assert.equal(buildIsCollapsible(workflow), true);
+  assert.equal(deployIsProtected(workflow), true);
 });
 
 test("the concurrency resolver refuses an expression shape it cannot interpret", () => {

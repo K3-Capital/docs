@@ -9,8 +9,10 @@
  *   1. no `run:` script may contain a `${{ ... }}` expression, because GitHub
  *      substitutes expressions before the shell parses the script, which turns
  *      untrusted event data (a `repository_dispatch` payload) into shell code;
- *   2. pull-request validation and production must not share a concurrency group,
- *      and production must not be cancellable by a pull request.
+ *   2. the build job and the deploy job must not share a concurrency group: builds
+ *      are cancellable (a superseded build has nothing to publish), deployments are
+ *      not (a Pages publish must never be interrupted), and pull-request validation
+ *      must not be able to cancel either one.
  */
 
 import { readFile } from "node:fs/promises";
@@ -119,30 +121,60 @@ export function extractRunSteps(text) {
   return steps.filter((step) => step.run !== null);
 }
 
-/** The top-level `concurrency:` block as `{ group, cancelInProgress }`. */
-export function extractConcurrency(text) {
+/**
+ * The per-job `concurrency:` blocks as `{ <job>: { group, cancelInProgress } }`.
+ *
+ * Job-level concurrency is what lets the workflow collapse concurrent builds while
+ * keeping deployments non-cancellable: the build job may be cancelled by a newer
+ * build, the deploy job may not be cancelled by anything.
+ */
+export function extractJobConcurrency(text) {
   const lines = text.split("\n");
-  const start = lines.findIndex((line) => /^concurrency:\s*$/.test(line));
-  if (start === -1) {
-    throw new Error("no top-level concurrency: block in the workflow");
+  const jobsIndex = lines.findIndex((line) => /^jobs:\s*$/.test(line));
+  if (jobsIndex === -1) {
+    throw new Error("no top-level jobs: block in the workflow");
   }
 
-  const { block } = readIndentedBlock(lines, start + 1, 0);
+  const { next } = readIndentedBlock(lines, jobsIndex + 1, 0);
   const concurrency = {};
+  let job = null;
 
-  for (const line of block) {
-    const entry = line.match(/^\s*group:\s*(.*?)\s*$/);
-    if (entry) {
-      concurrency.group = entry[1];
+  for (let index = jobsIndex + 1; index < next; index += 1) {
+    const line = lines[index];
+    if (isBlank(line)) {
+      continue;
     }
-    const cancel = line.match(/^\s*cancel-in-progress:\s*(.*?)\s*$/);
-    if (cancel) {
-      concurrency.cancelInProgress = cancel[1];
-    }
-  }
 
-  if (!concurrency.group || !concurrency.cancelInProgress) {
-    throw new Error("concurrency: block must set both group and cancel-in-progress");
+    const indent = indentOf(line);
+
+    if (indent === 2) {
+      const header = line.match(/^ {2}([A-Za-z0-9_-]+):\s*$/);
+      if (header) {
+        job = header[1];
+        concurrency[job] = {};
+        continue;
+      }
+    }
+
+    if (job === null || indent !== 4 || !/^ {4}concurrency:\s*$/.test(line)) {
+      continue;
+    }
+
+    const { block } = readIndentedBlock(lines, index + 1, indent);
+    for (const entry of block) {
+      const group = entry.match(/^\s*group:\s*(.*?)\s*$/);
+      if (group) {
+        concurrency[job].group = group[1];
+      }
+      const cancel = entry.match(/^\s*cancel-in-progress:\s*(.*?)\s*$/);
+      if (cancel) {
+        concurrency[job].cancelInProgress = cancel[1];
+      }
+    }
+
+    if (!concurrency[job].group || !concurrency[job].cancelInProgress) {
+      throw new Error(`job ${job}: concurrency: block must set both group and cancel-in-progress`);
+    }
   }
 
   return concurrency;
@@ -253,6 +285,27 @@ function readProperty(event, property) {
 
 function truthy(value) {
   return value !== "" && value !== "false" && value !== "0" && value != null;
+}
+
+/**
+ * The effective concurrency group for an event. `group:` is either a literal string
+ * (the deploy job's fixed group) or the restricted expression shape above.
+ */
+export function resolveGroup(expression, event) {
+  const trimmed = expression.trim();
+  return trimmed.includes("${{") ? resolveConcurrencyGroup(trimmed, event) : trimmed;
+}
+
+/**
+ * The effective `cancel-in-progress:` flag for an event: a literal boolean, or an
+ * expression that must resolve to `true`/`false`.
+ */
+export function resolveConcurrencyFlag(expression, event) {
+  const trimmed = expression.trim();
+  if (trimmed === "true" || trimmed === "false") {
+    return trimmed === "true";
+  }
+  return resolveConcurrencyGroup(trimmed, event) === "true";
 }
 
 /** Loads the workflow file. */
