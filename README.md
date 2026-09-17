@@ -82,12 +82,70 @@ part of the artifact and gated by `test/workflow.test.mjs`:
   before the shell parses the script, so a `repository_dispatch` payload (attacker-
   influenced data) would become shell code. Payload values are passed through `env:`
   and read as quoted shell variables instead.
-- pull-request validation and production do not share a concurrency group: PRs run in
-  `docs-pr-<number>` with `cancel-in-progress`, everything else in `docs-pages-deploy`
-  without it. A push to a PR therefore cancels only other validation runs — never an
-  in-flight deployment — and production runs queue rather than interrupt each other.
+- a `repository_dispatch` must come from the dedicated dispatcher App *and* name a
+  configured documentation source. `scripts/validate-dispatch-source.mjs` is the first
+  step after the portal checkout, so an unexpected caller is rejected before any source
+  repository is initialised. The payload's repository is a claim the caller writes, so it
+  is only read once the event sender — the dispatcher App's bot identity — has been
+  matched against `DISPATCHER_BOT_LOGIN`.
+- concurrency lives on the jobs, not on the workflow: the `build` job collapses
+  concurrent builds (`cancel-in-progress: true` — a superseded build is a pure function
+  of the source branches and has nothing to publish), while the `deploy` job runs in its
+  own `docs-pages-deploy` group with `cancel-in-progress: false`, so a Pages publish is
+  never interrupted. Pull-request validation keeps its own per-PR group and can cancel
+  neither a production build nor a deployment.
 - the checkout repositories, vendor paths, npm cache keys and artifact-summary paths match
   `DOC_SETS`, so the workflow and the assembler cannot drift apart silently.
+
+## Rebuilding when a source repository changes
+
+`docs` is the only repository that assembles and deploys the combined site, and the only
+one holding Pages credentials. Each documentation source repository
+(`k3-vault-docs`, `sBOLT-docs`) carries a small `notify-docs-portal.yml` workflow that
+runs after a push to its `main`:
+
+1. mints a short-lived GitHub App installation token scoped to `K3-Capital/docs` and to
+   `contents: write` — the one permission the dispatch endpoint needs
+   (`actions/create-github-app-token`, with `repositories: docs`,
+   `permission-contents: write`) — no long-lived PAT, and no permission for the source
+   repository itself;
+2. POSTs a `repository_dispatch` to this repository with
+   `event_type: docs-source-updated` and `client_payload: { repository, sha, ref }`.
+
+The sender's token is scoped to this repository alone, so the source repositories gain no
+deployment credentials of any kind. The workflow file and its contract test live in the
+source repositories; the contract itself is asserted on this side too
+(`test/dispatch.test.mjs` checks the event type, the known source repositories and the
+caller gate against the workflow).
+
+### The dispatcher App
+
+The senders authenticate with a **dedicated** dispatcher App, `k3-docs-dispatcher`:
+
+- created and installed on `K3-Capital/docs` **only**, with `Contents: Read and write` and
+  no other repository permission. Its installation token reaches this repository and no
+  other, and is requested with the single permission the dispatch endpoint needs; it
+  carries no `pages` permission, so the App can ask for a rebuild but never publish the
+  site;
+- its credentials (`DOCS_DISPATCH_APP_ID`, `DOCS_DISPATCH_APP_PRIVATE_KEY`) are stored as
+  repository or organisation secrets visible to `k3-vault-docs` and `sBOLT-docs`.
+
+Do not reuse the broader K3 App for this. What each source repository stores is the App
+**private key**, and a key can mint installation tokens for every installation and
+repository of the App that owns it, so copying a wide App's key into two more repositories
+expands its blast radius well beyond the dispatch it is needed for.
+
+The receiving side pins that App by identity: a dispatch created with an installation
+token carries the App's bot user as the event sender, so `deploy.yml` requires
+`github.event.sender.login` to be `k3-docs-dispatcher[bot]` (both constants live in
+`scripts/lib/dispatch.mjs`). A renamed App, or a dispatch from any other principal — a
+collaborator's token, another App, an unexpected bot — fails the gate even when its
+payload names a real source repository. Until the App exists and its secrets are set, the
+notify workflows fail visibly at the token step and send nothing.
+
+Manual rebuilds stay available: `workflow_dispatch` on this workflow rebuilds the whole
+site, and `workflow_dispatch` on a source repository's notify workflow re-sends its
+dispatch.
 
 ## Local verification
 
