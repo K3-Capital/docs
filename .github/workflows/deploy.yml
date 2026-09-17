@@ -35,12 +35,21 @@ jobs:
           ref: main
           path: vendor/k3-vault-docs
 
+      - name: Checkout sBOLD documentation source
+        uses: actions/checkout@v6
+        with:
+          repository: K3-Capital/sBOLT-docs
+          ref: main
+          path: vendor/sBOLT-docs
+
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: vendor/k3-vault-docs/package-lock.json
+          cache-dependency-path: |
+            vendor/k3-vault-docs/package-lock.json
+            vendor/sBOLT-docs/package-lock.json
 
       - name: Record documentation source revisions
         # Dispatch payload values are attacker-influenced data, and this workflow runs
@@ -53,6 +62,7 @@ jobs:
           DISPATCH_SHA: ${{ github.event.client_payload.sha }}
         run: |
           echo "vault docs source: $(git -C vendor/k3-vault-docs rev-parse HEAD)"
+          echo "sBOLD docs source: $(git -C vendor/sBOLT-docs rev-parse HEAD)"
           if [ "$EVENT_NAME" = "repository_dispatch" ]; then
             echo "dispatch payload repository: $DISPATCH_REPOSITORY"
             echo "dispatch payload sha:        $DISPATCH_SHA"
@@ -68,6 +78,7 @@ jobs:
         run: |
           echo "pages: $(find _site -name '*.html' | wc -l)"
           echo "vault pages: $(find _site/vault-infra -name '*.html' | wc -l)"
+          echo "sBOLD pages: $(find _site/sBOLT -name '*.html' | wc -l)"
           ls -la _site
 
       - name: Upload GitHub Pages artifact

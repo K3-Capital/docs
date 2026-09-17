@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { DEFAULTS, SBOLT_DOC_SET, VAULT_DOC_SET } from "../scripts/lib/site.mjs";
 import {
   extractConcurrency,
   extractRunSteps,
@@ -10,6 +11,10 @@ import {
 
 const workflow = await readWorkflow();
 const runSteps = extractRunSteps(workflow);
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 /** The pre-fix step, kept as a fixture so the detector is exercised on the real bug. */
 const VULNERABLE_STEP = `name: Record documentation source revisions
@@ -40,6 +45,38 @@ test("the workflow reader sees the real run steps", () => {
   ]) {
     stepNamed(name);
   }
+});
+
+test("the workflow checks out and builds every configured documentation source", () => {
+  // The workflow's checkout targets and the assembler's doc-set config must not drift:
+  // renaming a source repo or a destination path in one place has to fail here.
+  for (const set of [VAULT_DOC_SET, SBOLT_DOC_SET]) {
+    assert.match(
+      workflow,
+      new RegExp(`repository: ${escapeRegExp(`K3-Capital/${set.repoDir.split("/").pop()}`)}`),
+      `the workflow must check out ${set.repoDir}`,
+    );
+    assert.match(
+      workflow,
+      new RegExp(`path: ${escapeRegExp(set.repoDir)}`),
+      `the workflow must check ${set.repoDir.split("/").pop()} out at ${set.repoDir}`,
+    );
+    assert.match(
+      workflow,
+      new RegExp(`cache-dependency-path:[\\s\\S]*?${escapeRegExp(set.repoDir)}/package-lock\\.json`),
+      `the npm cache must key on ${set.repoDir}/package-lock.json`,
+    );
+    assert.match(
+      workflow,
+      new RegExp(`_site/${escapeRegExp(set.dirName)}`),
+      `the artifact summary must count the /${set.dirName}/ pages`,
+    );
+  }
+
+  const record = stepNamed("Record documentation source revisions");
+  assert.match(record.run, /echo "vault docs source: \$\(git -C vendor\/k3-vault-docs rev-parse HEAD\)"/);
+  assert.match(record.run, /echo "sBOLD docs source: \$\(git -C vendor\/sBOLT-docs rev-parse HEAD\)"/);
+  assert.equal(DEFAULTS.sboltDirName, SBOLT_DOC_SET.dirName);
 });
 
 test("no run: script interpolates a ${{ }} expression into the shell", () => {
