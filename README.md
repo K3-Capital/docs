@@ -35,10 +35,14 @@ assembled artifact with `scripts/assemble-site.mjs`:
 - `/index.html` redirects to `vault-infra/` with a relative target, so it works both at
   `https://docs.k3.capital/` and at the `https://k3-capital.github.io/docs/` preview URL;
 - no reference to the vault docs' previous origin (`k3-capital.github.io/k3-vault-docs`)
-  remains — the sidebar links to the generated `llms.txt` artifacts are rewritten to
-  page-relative paths, and the absolute URLs inside those artifacts are repointed at the
-  canonical `https://docs.k3.capital/vault-infra/` base;
-- every local `href`/`src` in the artifact resolves to a file in the artifact (0 broken).
+  remains — the sidebar links to the generated `llms.txt` artifacts (and HonKit's inline
+  `gitbook.page.hasChanged` navigation metadata) are rewritten to page-relative paths, and
+  the absolute URLs inside those artifacts are repointed at the canonical
+  `https://docs.k3.capital/vault-infra/` base;
+- every local `href`/`src` in the artifact resolves to a file in the artifact (0 broken);
+- every ```` ```mermaid ```` block in the artifact contains a rendered inline SVG — HonKit
+  exits 0 while publishing raw diagram source if its headless browser is missing, so this
+  is a build failure rather than a silent regression.
 
 A failing check fails the build, so a broken link or a lost redirect cannot deploy.
 

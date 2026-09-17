@@ -80,4 +80,7 @@ if (options.verify) {
   );
   console.log("Verified: / redirects to /vault-infra/");
   console.log(`Verified: no reference to ${DEFAULTS.legacyOrigin} remains in the artifact`);
+  console.log(
+    `Verified: ${evidence.mermaidRendered}/${evidence.mermaidBlocks} Mermaid block(s) rendered as inline SVG (0 published as raw source)`,
+  );
 }

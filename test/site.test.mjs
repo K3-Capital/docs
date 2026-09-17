@@ -24,6 +24,7 @@ const LEGACY = DEFAULTS.legacyOrigin;
 /** Minimal stand-in for a HonKit build of k3-vault-docs. */
 async function makeVaultBuild(root) {
   await mkdir(path.join(root, "introduction"), { recursive: true });
+  await mkdir(path.join(root, "architecture"), { recursive: true });
   await mkdir(path.join(root, "gitbook"), { recursive: true });
 
   const sidebar = [
@@ -49,6 +50,12 @@ ${sidebar}
   );
   await writeFile(path.join(root, "gitbook", "style.css"), "body{}\n");
   await writeFile(path.join(root, "gitbook", "gitbook.js"), "// honkit\n");
+  await writeFile(
+    path.join(root, "architecture", "system-design.html"),
+    `<!doctype html><html><head><title>K3 Vaults - System design</title></head><body>
+<pre><code class="lang-mermaid"><svg id="my-svg" class="flowchart" viewbox="0 0 10 10"></svg></code></pre>
+</body></html>`,
+  );
   await writeFile(
     path.join(root, "llms.txt"),
     `# K3 Vaults\n\n- [FAQ](${LEGACY}/introduction/faq.html)\n- [llms-full.txt](${LEGACY}/llms-full.txt)\n`,
@@ -129,8 +136,29 @@ test("assemble + verify produces a servable /vault-infra/ tree and a root redire
 
     const evidence = await verifySite({ outDir: out });
     assert.equal(evidence.vaultDirName, "vault-infra");
-    assert.equal(evidence.pages, 3, "root redirect + 2 vault pages");
+    assert.equal(evidence.pages, 4, "root redirect + 3 vault pages");
     assert.ok(evidence.linksChecked >= 5);
+    assert.deepEqual(
+      { blocks: evidence.mermaidBlocks, rendered: evidence.mermaidRendered },
+      { blocks: 1, rendered: 1 },
+    );
+  });
+});
+
+test("verifySite rejects a page that published Mermaid source instead of a diagram", async () => {
+  await withTempDir(async (dir) => {
+    const build = path.join(dir, "build");
+    const out = path.join(dir, "_site");
+    await makeVaultBuild(build);
+    await mkdir(out, { recursive: true });
+    await assembleVaultDocs({ vaultBuildDir: build, outDir: out });
+    await writeSiteRoot({ outDir: out });
+    await writeFile(
+      path.join(out, "vault-infra", "architecture", "system-design.html"),
+      '<pre><code class="lang-mermaid">flowchart TB\n  A --> B\n</code></pre>',
+    );
+
+    await assert.rejects(() => verifySite({ outDir: out }), /Mermaid block\(s\) were published as raw source/);
   });
 });
 

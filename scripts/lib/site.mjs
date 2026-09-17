@@ -238,6 +238,34 @@ export async function findBrokenLinks({ root }) {
   return { checked, missing };
 }
 
+/**
+ * Mermaid rendering gate. The vault docs render Mermaid with the HonKit
+ * `mermaid-hybrid` plugin (embed: true): the plugin replaces the *content* of each
+ * ```mermaid block with an inline <svg>, keeping the surrounding
+ * `<pre><code class="lang-mermaid">` element. When the rendering toolchain is missing
+ * (no headless browser on the runner), HonKit exits 0 and publishes the raw diagram
+ * source instead — the exact silent failure seen in KOP-276. So the gate is: every
+ * mermaid block in the artifact must contain an inline SVG.
+ */
+export async function checkMermaidRendering({ root }) {
+  const blockPattern = /<code[^>]*class="lang(?:uage)?-mermaid"[^>]*>([\s\S]*?)<\/code>/g;
+  let blocks = 0;
+  let rendered = 0;
+  const pages = [];
+
+  for (const page of (await listFiles(root)).filter((rel) => rel.endsWith(".html"))) {
+    const html = await readFile(path.join(root, page), "utf8");
+    const matches = [...html.matchAll(blockPattern)];
+    if (matches.length > 0) pages.push(page);
+    for (const match of matches) {
+      blocks += 1;
+      if (/<svg[\s>]/.test(match[1])) rendered += 1;
+    }
+  }
+
+  return { blocks, rendered, pages };
+}
+
 /** Gather every occurrence of the legacy origin left in the assembled site. */
 export async function findLegacyOriginReferences({ root, legacyOrigin = DEFAULTS.legacyOrigin }) {
   const hits = [];
@@ -288,9 +316,20 @@ export async function verifySite({
     throw new Error(`${missing.length} broken local link(s) in the assembled site:\n  ${sample}`);
   }
 
+  const mermaid = await checkMermaidRendering({ root: outDir });
+  if (mermaid.rendered < mermaid.blocks) {
+    const unrendered = mermaid.blocks - mermaid.rendered;
+    throw new Error(
+      `${unrendered}/${mermaid.blocks} Mermaid block(s) were published as raw source instead of rendered SVG ` +
+        `(pages: ${mermaid.pages.join(", ")}) — the docs build is missing its headless browser`,
+    );
+  }
+
   return {
     pages: (await listFiles(outDir)).filter((rel) => rel.endsWith(".html")).length,
     linksChecked: checked,
+    mermaidBlocks: mermaid.blocks,
+    mermaidRendered: mermaid.rendered,
     vaultDirName,
   };
 }
