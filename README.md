@@ -46,13 +46,25 @@ assembled artifact with `scripts/assemble-site.mjs`:
 
 A failing check fails the build, so a broken link or a lost redirect cannot deploy.
 
+Because the deploy job holds a Pages write token, the workflow itself is treated as
+part of the artifact and gated by `test/workflow.test.mjs`:
+
+- no `run:` script contains a `${{ ... }}` expression. Expressions are substituted
+  before the shell parses the script, so a `repository_dispatch` payload (attacker-
+  influenced data) would become shell code. Payload values are passed through `env:`
+  and read as quoted shell variables instead.
+- pull-request validation and production do not share a concurrency group: PRs run in
+  `docs-pr-<number>` with `cancel-in-progress`, everything else in `docs-pages-deploy`
+  without it. A push to a PR therefore cancels only other validation runs — never an
+  in-flight deployment — and production runs queue rather than interrupt each other.
+
 ## Local verification
 
 ```bash
 multica repo checkout https://github.com/K3-Capital/k3-vault-docs   # or git clone
 mkdir -p vendor && ln -s /path/to/k3-vault-docs vendor/k3-vault-docs
 
-npm test                    # unit tests for the assembly + verification helpers
+npm test                    # unit tests for the assembly, verification and workflow gates
 scripts/build-site.sh       # full build (HonKit + Mermaid) and assembly into _site/
 scripts/verify-site.mjs     # re-check an already assembled _site/
 python3 -m http.server 8080 --directory _site   # http://localhost:8080/ -> /vault-infra/
