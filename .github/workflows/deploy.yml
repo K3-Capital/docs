@@ -1,0 +1,97 @@
+name: Build and deploy docs.k3.capital
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [docs-source-updated]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Pull-request validation gets its own per-PR group, so a push to a PR can only
+  # cancel other validation runs — never an in-flight production deployment.
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'docs-pages-deploy' }}
+  # Only validation runs are cancelled. Production runs queue instead of cancelling
+  # each other, so a deploy that already started is never interrupted.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout portal repository
+        uses: actions/checkout@v6
+
+      - name: Checkout vault documentation source
+        uses: actions/checkout@v6
+        with:
+          repository: K3-Capital/k3-vault-docs
+          ref: main
+          path: vendor/k3-vault-docs
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vendor/k3-vault-docs/package-lock.json
+
+      - name: Record documentation source revisions
+        # Dispatch payload values are attacker-influenced data, and this workflow runs
+        # with a token that can deploy Pages. They are passed through `env:` and read as
+        # shell variables instead of being interpolated into the script, so shell
+        # metacharacters in the payload can never be executed.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_REPOSITORY: ${{ github.event.client_payload.repository }}
+          DISPATCH_SHA: ${{ github.event.client_payload.sha }}
+        run: |
+          echo "vault docs source: $(git -C vendor/k3-vault-docs rev-parse HEAD)"
+          if [ "$EVENT_NAME" = "repository_dispatch" ]; then
+            echo "dispatch payload repository: $DISPATCH_REPOSITORY"
+            echo "dispatch payload sha:        $DISPATCH_SHA"
+          fi
+
+      - name: Run portal unit tests
+        run: npm test
+
+      - name: Build documentation sources and assemble the site
+        run: scripts/build-site.sh
+
+      - name: Summarise the assembled artifact
+        run: |
+          echo "pages: $(find _site -name '*.html' | wc -l)"
+          echo "vault pages: $(find _site/vault-infra -name '*.html' | wc -l)"
+          ls -la _site
+
+      - name: Upload GitHub Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
