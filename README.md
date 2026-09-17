@@ -12,10 +12,16 @@ Current layout of the deployed artifact:
 | --- | --- |
 | `/` | Redirect to `/vault-infra/` (a chooser page will replace it when more doc sets land) |
 | `/vault-infra/` | [K3-Capital/k3-vault-docs](https://github.com/K3-Capital/k3-vault-docs) built with HonKit |
+| `/sBOLT/` | [K3-Capital/sBOLT-docs](https://github.com/K3-Capital/sBOLT-docs) built with HonKit |
 
-`sBOLD` documentation is not included yet: its source repository does not exist. When it
-does, add a second checkout plus a `/<path>/` destination in `scripts/build-site.sh` and
-`scripts/assemble-site.mjs`, and turn the root redirect into a chooser page.
+The sBOLD documentation is served under `/sBOLT/` — the casing the source repository and
+the hosting request use. The product and the documentation content are spelled `sBOLD`;
+the path segment is the single constant `dirName` in the `sbolt` entry of `DOC_SETS`
+(`scripts/lib/site.mjs`), so it can be flipped in one place if that reading is wrong.
+
+The two doc sets are configured in one place, `DOC_SETS` in `scripts/lib/site.mjs`. Adding
+a third means adding an entry there, a matching checkout in `.github/workflows/deploy.yml`,
+and (when there is more than one set) turning the root redirect into a chooser page.
 
 ## How it is built
 
@@ -25,26 +31,49 @@ documentation source repository can rebuild the site. It checks out each source
 repository at `main`, runs the source project's own build, and calls:
 
 ```bash
-scripts/build-site.sh          # VAULT_DIR=vendor/k3-vault-docs OUT_DIR=_site
+scripts/build-site.sh    # VAULT_DIR=vendor/k3-vault-docs SBOLT_DIR=vendor/sBOLT-docs OUT_DIR=_site
 ```
 
-which builds `/vault-infra/` from the vault docs `_book` output and then gates the
-assembled artifact with `scripts/assemble-site.mjs`:
+which builds each source into `_book`, assembles `/vault-infra/` and `/sBOLT/`, and gates
+the result with `scripts/assemble-site.mjs`. A failing check fails the build, so a broken
+link, a lost redirect or a missing asset cannot deploy.
 
-- `/vault-infra/index.html` exists (the documentation set is served at the expected path);
+Per documentation set:
+
+- `/<dir>/index.html` exists — the set is actually served at its path;
 - `/index.html` redirects to `vault-infra/` with a relative target, so it works both at
   `https://docs.k3.capital/` and at the `https://k3-capital.github.io/docs/` preview URL;
-- no reference to the vault docs' previous origin (`k3-capital.github.io/k3-vault-docs`)
-  remains — the sidebar links to the generated `llms.txt` artifacts (and HonKit's inline
-  `gitbook.page.hasChanged` navigation metadata) are rewritten to page-relative paths, and
-  the absolute URLs inside those artifacts are repointed at the canonical
-  `https://docs.k3.capital/vault-infra/` base;
+- no reference to the source project's previous origin remains. The sidebar links to the
+  generated `llms.txt` artifacts (and HonKit's inline `gitbook.page.hasChanged` navigation
+  metadata) are rewritten to page-relative paths; the absolute URLs inside the llms
+  artifacts are repointed at the set's canonical base; and the source trees HonKit copies
+  into the build (`scripts/`, theme CSS) are scrubbed too;
+- every `<img src>` resolves to a non-empty file, and every file the source build shipped
+  under `assets/` landed in the artifact with the same size — a pipeline that copies only
+  rendered HTML, or drops or truncates an asset, fails here;
+- every absolute URL the generated `llms.txt` / `llms-full.txt` publish under the set's
+  base resolves to a page in the artifact. Exceptions are tracked by name in the set's
+  `knownUnresolvedArtifactLinks`; an exempted link that starts resolving fails the build,
+  so the list cannot rot.
+
+Artifact-wide:
+
 - every local `href`/`src` in the artifact resolves to a file in the artifact (0 broken);
 - every ```` ```mermaid ```` block in the artifact contains a rendered inline SVG — HonKit
   exits 0 while publishing raw diagram source if its headless browser is missing, so this
   is a build failure rather than a silent regression.
 
-A failing check fails the build, so a broken link or a lost redirect cannot deploy.
+### Tracked upstream defects
+
+`knownUnresolvedArtifactLinks` currently exempts two links in the vault artifact:
+`/vault-infra/introduction/money-flow.html` and `/vault-infra/introduction/overview.html`.
+`architecture/security-assumptions.md` links `../introduction/money-flow.md` and
+`../introduction/overview.md`; both files exist in `k3-vault-docs` but are absent from its
+`SUMMARY.md`, so the vault build never publishes them, and its llms generator rewrites the
+links to `.html` anyway. Fixing it is an authoring change in `k3-vault-docs`; when it is
+fixed, the build fails until the two entries are removed.
+
+### Workflow gates
 
 Because the deploy job holds a Pages write token, the workflow itself is treated as
 part of the artifact and gated by `test/workflow.test.mjs`:
@@ -57,12 +86,17 @@ part of the artifact and gated by `test/workflow.test.mjs`:
   `docs-pr-<number>` with `cancel-in-progress`, everything else in `docs-pages-deploy`
   without it. A push to a PR therefore cancels only other validation runs — never an
   in-flight deployment — and production runs queue rather than interrupt each other.
+- the checkout repositories, vendor paths, npm cache keys and artifact-summary paths match
+  `DOC_SETS`, so the workflow and the assembler cannot drift apart silently.
 
 ## Local verification
 
 ```bash
 multica repo checkout https://github.com/K3-Capital/k3-vault-docs   # or git clone
-mkdir -p vendor && ln -s /path/to/k3-vault-docs vendor/k3-vault-docs
+multica repo checkout https://github.com/K3-Capital/sBOLT-docs
+mkdir -p vendor
+ln -s /path/to/k3-vault-docs vendor/k3-vault-docs
+ln -s /path/to/sBOLT-docs    vendor/sBOLT-docs
 
 npm test                    # unit tests for the assembly, verification and workflow gates
 scripts/build-site.sh       # full build (HonKit + Mermaid) and assembly into _site/
@@ -70,8 +104,8 @@ scripts/verify-site.mjs     # re-check an already assembled _site/
 python3 -m http.server 8080 --directory _site   # http://localhost:8080/ -> /vault-infra/
 ```
 
-The vault docs build needs Node 22 and a headless Chromium for the Mermaid plugin
-(`npx puppeteer browsers install chrome-headless-shell` in the vault repo if the build
+The documentation builds need Node 22 and a headless Chromium for the Mermaid plugin
+(`npx puppeteer browsers install chrome-headless-shell` in a source repo if its build
 logs a missing-browser error).
 
 ## Deployment
