@@ -1,0 +1,16 @@
+{
+  "name": "k3-docs-portal",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Aggregates K3 documentation sources into the static site served at docs.k3.capital",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build": "scripts/build-site.sh",
+    "assemble": "node scripts/assemble-site.mjs",
+    "verify": "node scripts/verify-site.mjs"
+  }
+}
