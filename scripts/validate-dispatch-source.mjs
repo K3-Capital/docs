@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 /**
- * Validates the `repository_dispatch` payload of a documentation rebuild.
+ * Authorizes an incoming `repository_dispatch` before the portal builds anything.
  *
- * Run from `.github/workflows/deploy.yml` with `DISPATCH_REPOSITORY` in the
- * environment (never interpolated into the shell). Exits non-zero when the
- * dispatching repository is not one of the configured documentation sources.
+ * Run from `.github/workflows/deploy.yml` with `DISPATCH_SENDER` and
+ * `DISPATCH_REPOSITORY` in the environment (never interpolated into the shell). Exits
+ * non-zero unless the dispatch was created by the dedicated dispatcher App and its
+ * payload names a configured documentation source.
  */
-import { assertKnownSourceRepository } from "./lib/dispatch.mjs";
+import { assertAuthorizedDispatch } from "./lib/dispatch.mjs";
 
 try {
-  const repository = assertKnownSourceRepository(process.env.DISPATCH_REPOSITORY);
-  console.log(`dispatch source accepted: ${repository}`);
+  const repository = assertAuthorizedDispatch({
+    repository: process.env.DISPATCH_REPOSITORY,
+    sender: process.env.DISPATCH_SENDER,
+  });
+  console.log(`dispatch accepted: ${process.env.DISPATCH_SENDER} -> ${repository}`);
 } catch (error) {
-  console.error(`dispatching repository rejected: ${error.message}`);
+  console.error(`dispatch rejected: ${error.message}`);
   process.exit(1);
 }

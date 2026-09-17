@@ -31,6 +31,25 @@ jobs:
       - name: Checkout portal repository
         uses: actions/checkout@v6
 
+      - name: Validate the dispatch source
+        # Two independent checks, and the payload is only read after the caller is known.
+        #
+        # `github.event.sender.login` is the authenticated identity of the App whose
+        # installation token created the dispatch — the dispatcher App's bot user. The
+        # payload's `repository` is supplied by the caller and can name any repository it
+        # likes, so on its own it is a claim, not a credential: this step runs before any
+        # source is checked out, so an unexpected caller is rejected before the build is
+        # initialised rather than after.
+        #
+        # Both values are attacker-influenced data read from the event, so they travel
+        # through `env:` and are validated by a script — never interpolated into a `run:`
+        # shell script.
+        if: github.event_name == 'repository_dispatch'
+        env:
+          DISPATCH_SENDER: ${{ github.event.sender.login }}
+          DISPATCH_REPOSITORY: ${{ github.event.client_payload.repository }}
+        run: node scripts/validate-dispatch-source.mjs
+
       - name: Checkout vault documentation source
         uses: actions/checkout@v6
         with:
@@ -53,16 +72,6 @@ jobs:
           cache-dependency-path: |
             vendor/k3-vault-docs/package-lock.json
             vendor/sBOLT-docs/package-lock.json
-
-      - name: Validate the dispatch source
-        # Only the configured documentation source repositories may trigger a
-        # deployment. The dispatched repository name is attacker-influenced data read
-        # from the event payload, so it is passed through `env:` and validated in a
-        # script — never interpolated into a `run:` shell script.
-        if: github.event_name == 'repository_dispatch'
-        env:
-          DISPATCH_REPOSITORY: ${{ github.event.client_payload.repository }}
-        run: node scripts/validate-dispatch-source.mjs
 
       - name: Record documentation source revisions
         # Dispatch payload values are attacker-influenced data, and this workflow runs
